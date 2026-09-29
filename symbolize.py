@@ -98,6 +98,16 @@ def read_dump(path):
     rip = struct.unpack_from("<Q", d, crva + 248)[0]
     _, mrva = streams[4]
     base, size = struct.unpack_from("<QI", d, mrva + 4)
+    modules = []
+    nmod = struct.unpack_from("<I", d, mrva)[0]
+    for i in range(nmod):
+        off = mrva + 4 + 108 * i
+        mbase, msize = struct.unpack_from("<QI", d, off)
+        name_rva = struct.unpack_from("<I", d, off + 20)[0]
+        nlen = struct.unpack_from("<I", d, name_rva)[0]
+        mname = d[name_rva + 4:name_rva + 4 + nlen].decode("utf-16-le", errors="replace")
+        modules.append((mbase, mbase + msize, mname))
+    modules.sort()
     # thread list: find crashing thread's stack memory
     stack = b""
     stack_start = 0
@@ -111,7 +121,7 @@ def read_dump(path):
             stack = d[srva:srva + ssize]
             break
     return dict(tid=tid, code=code, flags=flags, fault=fault, rip=rip, rsp=rsp, base=base,
-                size=size, stack=stack, stack_start=stack_start)
+                size=size, stack=stack, stack_start=stack_start, modules=modules)
 
 
 def main():
@@ -136,41 +146,85 @@ def main():
         inside = sz == 0 or off < a + sz
         return nm, off - a, inside
 
-    report_names = set()
+    libcache = {}
+
+    def lib_syms(path):
+        if path not in libcache:
+            local_lib = os.path.join(WORK, "libs", path.strip("/").replace("/", "_"))
+            os.makedirs(os.path.dirname(local_lib), exist_ok=True)
+            if not os.path.exists(local_lib):
+                subprocess.run(["docker", "cp", "-L", f"{CONTAINER}:{path}", local_lib], capture_output=True)
+            try:
+                ls, _, lt = elf_symbols(local_lib)
+                libcache[path] = (ls, [x[0] for x in ls], lt)
+            except Exception:
+                libcache[path] = ([], [], None)
+        return libcache[path]
+
+    def resolve(addr, modules):
+        for mb, me, mn in modules:
+            if mb <= addr < me:
+                if mn == exe or os.path.basename(mn) == os.path.basename(exe):
+                    o = addr - mb
+                    if not (text and text[0] <= o < text[1]):
+                        return None
+                    return (os.path.basename(mn), o, None)
+                ls, la, lt = lib_syms(mn)
+                o = addr - mb
+                if lt and not (lt[0] <= o < lt[1]):
+                    return None
+                i = bisect.bisect_right(la, o) - 1
+                if i < 0:
+                    return (os.path.basename(mn), o, None)
+                a, sz, nm = ls[i]
+                return (os.path.basename(mn), o, (nm, o - a, sz == 0 or o < a + sz))
+        return None
+
     rows = []
+    names = set()
     for fn in sorted(os.listdir(dumps)):
         if not fn.endswith(".dmp"):
             continue
         info = read_dump(os.path.join(dumps, fn))
-        off = info["rip"] - info["base"]
-        chain = []
         st = info["stack"]
         rsp_index = max(0, info["rsp"] - info["stack_start"])
-        for pos in range(rsp_index - rsp_index % 8, min(len(st), rsp_index + 16384), 8):
+        chain = []
+        for pos in range(rsp_index - rsp_index % 8, min(len(st), rsp_index + 32768), 8):
             v = struct.unpack_from("<Q", st, pos)[0]
-            o = v - info["base"]
-            if text and text[0] <= o < text[1]:
-                hit = lookup(o)
-                if hit:
-                    chain.append((o, hit))
-            if len(chain) >= 25:
+            r = resolve(v, info["modules"])
+            if r:
+                chain.append(r)
+                if r[2]:
+                    names.add(r[2][0])
+            if len(chain) >= 60:
                 break
-        rows.append((fn, info, off, lookup(off), chain))
-        report_names.add(lookup(off)[0] if lookup(off) else "")
-        report_names.update(h[0] for _, h in chain)
-    dem = demangle(n for n in report_names if n)
-    for fn, info, off, hit, chain in rows:
-        print(f"\n== {fn[:8]}  signal={info['code']} si_code={info['flags']} fault=0x{info['fault']:x}  rip=wechat+0x{off:x}")
-        if hit:
-            nm, delta, inside = hit
-            print(f"   crash in: {dem.get(nm, nm)} +0x{delta:x}{'' if inside else '  (nearest symbol below, outside its size)'}")
-        seen = set()
-        for o, (nm, delta, inside) in chain:
-            key = (nm, delta)
-            if key in seen:
-                continue
-            seen.add(key)
-            print(f"   <- 0x{o:x} {dem.get(nm, nm)[:110]} +0x{delta:x}{'' if inside else ' ?'}")
+        rows.append((fn, info, chain))
+    dem = demangle(names)
+    out = []
+    for fn, info, chain in rows:
+        out.append(f"\n== {fn[:8]} signal={info['code']} fault=0x{info['fault']:x} rip=wechat+0x{info['rip'] - info['base']:x}")
+        last = None
+        for mod, o, sym in chain:
+            if sym:
+                nm, delta, inside = sym
+                line = f"   <- {mod[:22]} {dem.get(nm, nm)[:100]} +0x{delta:x}{'' if inside else ' ?'}"
+            else:
+                line = f"   <- {mod[:22]} +0x{o:x}"
+            if line != last:
+                out.append(line)
+            last = line
+    report = "\n".join(out)
+    open(os.path.join(WORK, "report.txt"), "w").write(report + "\n")
+    libs_seen = sorted({m for _, _, ch in rows for m, _, s2 in ch if not m.lower().startswith("wechat")})
+    print("modules on crashing stacks (besides wechat):", ", ".join(libs_seen))
+    print("full report: /tmp/symwork/report.txt")
+    # print the most informative dump (latest) with non-wechat frames only + first wechat frames
+    fn, info, chain = rows[-1]
+    print(f"== {fn[:8]} rip=wechat+0x{info['rip'] - info['base']:x}")
+    for mod, o, sym in chain:
+        if sym:
+            nm, delta, inside = sym
+            print(f"   <- {mod[:22]} {dem.get(nm, nm)[:110]} +0x{delta:x}")
 
 
 if __name__ == "__main__":
