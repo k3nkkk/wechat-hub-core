@@ -14,13 +14,13 @@ import sys
 import urllib.request
 
 BASE = "https://raw.githubusercontent.com/k3nkkk/wechat-hub-core/COMMIT/"
-COMMIT = os.environ.get("EFBPATCH_COMMIT", "27fc0cd5b124177308584572c1462a39b3307fd3")
+COMMIT = os.environ.get("EFBPATCH_COMMIT", "c38c04e5f2de2d117c04068cf70e947661b950a7")
 CONTAINER = "wechat-hub-efb-1130"
 SRC = "/opt/efb-linux-wechat-slave"
 WORK = "/opt/build/efb-recovery"
 DEPLOY = "/opt/wechat-hub-deploy/deploy"
 NEW_TAG = "wechat-hub-efb-linux-wechat-slave:test-ordered9"
-PATCH_SHA256 = "d9b3b4651bc29a7741ee96c7724385396459ee4a115f611fe3800792fbe08ae6"
+PATCH_SHA256 = "c49c18090f63fe6cd9fd48c5a2f6d658eb2c3223c134f1ef05dd2327db843160"
 
 
 def run(cmd, **kw):
@@ -36,11 +36,10 @@ def current_image():
 
 def fetch_patch():
     path = os.path.join(WORK, "recovery.patch")
-    if not os.path.exists(path):
-        url = BASE.replace("COMMIT", COMMIT) + "recovery.patch"
-        data = urllib.request.urlopen(url, timeout=60).read()
-        with open(path, "wb") as f:
-            f.write(data)
+    url = BASE.replace("COMMIT", COMMIT) + "recovery.patch"
+    data = urllib.request.urlopen(url, timeout=60).read()
+    with open(path, "wb") as f:
+        f.write(data)
     digest = hashlib.sha256(open(path, "rb").read()).hexdigest()
     print("patch sha256", digest)
     if digest != PATCH_SHA256:
