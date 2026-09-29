@@ -1,5 +1,5 @@
 diff --git a/efb_wechat_comwechat_slave/ComWechat.py b/efb_wechat_comwechat_slave/ComWechat.py
-index 0a9a2df..95772bb 100644
+index 0a9a2df..06dbcfa 100644
 --- a/efb_wechat_comwechat_slave/ComWechat.py
 +++ b/efb_wechat_comwechat_slave/ComWechat.py
 @@ -40,6 +40,7 @@ from ehforwarderbot.types import ChatID, InstanceID, MessageID
@@ -10,10 +10,10 @@ index 0a9a2df..95772bb 100644
  from .CoreMessage import CoreMessageBuilder, MediaPendingError, MediaPermanentError
  from .EffectLedger import (
      BLOCKED_UNCERTAIN_EFFECT,
-@@ -244,6 +245,13 @@ class LinuxWeChatChannel(SlaveChannel):
-         self.send_echo_wait_sec = max(0.0, float(self.config.get("send_echo_wait_sec", 20.0)))
-         self._inflight_sends: Dict[str, Tuple[str, str, float]] = {}
-         self._reaction_lock = threading.Lock()
+@@ -194,6 +195,13 @@ class LinuxWeChatChannel(SlaveChannel):
+         self._login_lock = threading.Lock()
+         self._account_login_state: Dict[str, str] = {}
+         self._login_watchers: Dict[str, threading.Thread] = {}
 +        self.send_recovery = SendRecovery(
 +            send=self._core_send,
 +            post_notice=self._post_recovery_notice,
@@ -21,9 +21,9 @@ index 0a9a2df..95772bb 100644
 +            stop_event=self._stop_event,
 +            config=self.config.get("send_recovery"),
 +        )
- 
-         resolved_data_path = Path(data_path) if data_path is not None else efb_utils.get_data_path(self.channel_id)
-         self.cursor_store = CursorStore(resolved_data_path / "core-event-cursor.json")
+         # Retry3 shutdown coordination state.
+         self._shutdown_in_progress = threading.Event()
+         self._checkpoint_flush_lock = threading.Lock()
 @@ -947,12 +955,17 @@ class LinuxWeChatChannel(SlaveChannel):
              else:
                  raise EFBMessageTypeNotSupported(f"Unsupported outgoing EFB message type: {msg.type}")
