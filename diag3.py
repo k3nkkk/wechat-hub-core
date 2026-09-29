@@ -35,7 +35,7 @@ con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True, timeout=10)
 prev = None
 for et, occ, payload in con.execute(
     "SELECT event_type, occurred_at, payload_json FROM events "
-    "WHERE account_id LIKE '%1130%' AND event_type NOT LIKE 'message%' AND occurred_at >= ? ORDER BY cursor",
+    "WHERE account_id LIKE '%1130%' AND event_type LIKE 'account%' AND occurred_at >= ? ORDER BY cursor",
     (since_z,),
 ):
     try:
